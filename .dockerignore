@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+jenkins_home
+playwright_node_modules
+*.log
+**/__pycache__
+**/node_modules
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+playwright-test/playwright-report
+playwright-test/test-results
+robot-tests/results
+python-tests/reports
+python-tests/test-results

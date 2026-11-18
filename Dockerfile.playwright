@@ -1,0 +1,49 @@
+# ---------- Stage 1: build / browser download ----------
+FROM mcr.microsoft.com/playwright:v1.65.1-noble AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    npm_config_update_notifier=false
+
+WORKDIR /app
+
+# Install node deps (only package files for better caching).
+# The lockfile is committed, so `npm ci` is reproducible.
+COPY playwright-test/package.json playwright-test/package-lock.json /app/
+RUN npm ci --include=dev
+
+# Browsers and OS dependencies are already part of the official image.
+# Re-running the install is a cheap no-op when versions match.
+RUN npx playwright install --with-deps chromium firefox webkit
+
+# ---------- Stage 2: runtime ----------
+FROM mcr.microsoft.com/playwright:v1.65.1-noble AS runtime
+
+ARG PW_UID=1000
+ARG PW_GID=1000
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CI=true \
+    NODE_ENV=production
+
+# The image ships with "pwuser" at UID/GID 1001, and also has an "ubuntu"
+# user at UID/GID 1000. Remap pwuser to the requested host UID/GID; the -o
+# flags allow the duplicate 1000 IDs when the host user is 1000.
+RUN if [ "$(id -u pwuser)" != "${PW_UID}" ] || [ "$(id -g pwuser)" != "${PW_GID}" ]; then \
+        groupmod -o -g "${PW_GID}" pwuser \
+        && usermod -o -u "${PW_UID}" -g "${PW_GID}" pwuser \
+        && chown -R "${PW_UID}:${PW_GID}" /home/pwuser; \
+    fi
+
+# Copy installed node_modules and browsers from builder
+COPY --from=builder --chown=pwuser:pwuser /app/node_modules /playwright-test/node_modules
+COPY --from=builder --chown=pwuser:pwuser /ms-playwright /ms-playwright
+
+# Working dir for Playwright tests
+RUN mkdir -p /playwright-test && chown -R pwuser:pwuser /playwright-test
+WORKDIR /playwright-test
+USER pwuser
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# tini is already present in the base image
+CMD ["tail", "-f", "/dev/null"]

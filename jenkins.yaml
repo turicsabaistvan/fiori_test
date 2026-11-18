@@ -1,0 +1,69 @@
+jenkins:
+  systemMessage: "Fiori E2E Jenkins (local instance)"
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_ID}"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+jobs:
+  - script: |
+      pipelineJob('fiori-robot-e2e') {
+        description('Fiori E2E tests using Robot Framework + Browser')
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('git@github.com:turicsabaistvan/fiori.git')
+                  credentials('git-ssh-credentials')
+                }
+                branch('*/main')
+              }
+            }
+            scriptPath('robot-tests/Jenkinsfile')
+          }
+        }
+      }
+
+  - script: |
+      pipelineJob('fiori-playwright-e2e') {
+        description('Fiori E2E tests using Playwright (TypeScript)')
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('git@github.com:turicsabaistvan/fiori.git')
+                  credentials('git-ssh-credentials')
+                }
+                branch('*/main')
+              }
+            }
+            scriptPath('playwright-test/Jenkinsfile')
+          }
+        }
+      }
+
+  - script: |
+      pipelineJob('fiori-python-e2e') {
+        description('Fiori E2E tests using Python + Playwright')
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('git@github.com:turicsabaistvan/fiori.git')
+                  credentials('git-ssh-credentials')
+                }
+                branch('*/main')
+              }
+            }
+            scriptPath('python-tests/Jenkinsfile')
+          }
+        }
+      }

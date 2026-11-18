@@ -1,0 +1,113 @@
+services:
+  jenkins:
+    build:
+      context: .
+      dockerfile: Dockerfile.jenkins
+      args:
+        - JENKINS_UID=${JENKINS_UID:-1000}
+        - JENKINS_GID=${JENKINS_GID:-1000}
+    container_name: jenkins
+    restart: unless-stopped
+    user: "${JENKINS_UID:-1000}:${JENKINS_GID:-1000}"
+    init: true
+    ports:
+      - "0.0.0.0:8081:8080"
+      - "0.0.0.0:50001:50000"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    mem_limit: 2g
+    cpus: 1.0
+    networks:
+      test_network:
+        ipv4_address: 172.31.250.2
+    volumes:
+      - ./jenkins_home:/var/jenkins_home
+      - jenkins_tmp:/tmp
+      - dind_certs:/certs/client:ro
+      - ./docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
+      - ./generate-ssh-key.sh:/usr/local/bin/generate-ssh-key.sh:ro
+      - ./init.groovy.d:/var/jenkins_home/init.groovy.d:ro
+      - ./jenkins.yaml:/var/jenkins_home/casc_configs/jenkins.yaml:ro
+    environment:
+      # allow-same-origin is required by the published HTML reports
+      # (pytest-html and the Playwright report use sessionStorage/localStorage).
+      # Without it the reports are served into a sandboxed opaque origin, the
+      # report JavaScript throws a SecurityError and the report renders empty.
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false -XX:MaxRAMPercentage=75.0 -Dhudson.model.DirectoryBrowserSupport.CSP="sandbox allow-same-origin allow-scripts; default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' data:; img-src 'self' data:;"
+      - JENKINS_OPTS=--prefix=/
+      - CASC_JENKINS_CONFIG=/var/jenkins_home/casc_configs/jenkins.yaml
+      - DOCKER_HOST=tcp://dind:2376
+      - DOCKER_TLS_VERIFY=1
+      - DOCKER_CERT_PATH=/certs/client
+      - JENKINS_ADMIN_ID=${JENKINS_ADMIN_ID:-admin}
+      - JENKINS_ADMIN_PASSWORD=${JENKINS_ADMIN_PASSWORD:-admin}
+      - FIORI_USERNAME=${FIORI_USERNAME:-}
+      - FIORI_PASSWORD=${FIORI_PASSWORD:-}
+    depends_on:
+      dind:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/usr/local/bin/docker-entrypoint.sh"]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Docker-in-Docker daemon used by Jenkins to run the test suites in their
+  # own containers. Jenkins talks to it only over TLS; the host Docker socket
+  # is not mounted anywhere.
+  dind:
+    image: docker:24-dind
+    container_name: dind
+    restart: unless-stopped
+    privileged: true
+    # The TLS server certificate's SAN is generated from this hostname.
+    hostname: dind
+    networks:
+      test_network:
+        ipv4_address: 172.31.250.4
+    environment:
+      - DOCKER_TLS_CERTDIR=/certs
+    volumes:
+      - dind_certs:/certs/client
+      - dind_storage:/var/lib/docker
+      # Mirrors the Jenkins workspace at the same path, so bind mounts of
+      # the pipeline workspace resolve to the checked-out files inside dind.
+      - ./jenkins_home/workspace:/var/jenkins_home/workspace
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  test_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+
+volumes:
+  jenkins_tmp:
+  dind_certs:
+  dind_storage:

@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: lint and typecheck the stacks touched by the commit.
+#
+# Install once per clone:
+#   git config core.hooksPath .githooks
+#
+# Run manually against every stack:
+#   .githooks/pre-commit --all
+
+set -euo pipefail
+
+# Git GUIs and IDE commit helpers often run hooks with a minimal PATH.
+# Add the common tool locations so npm/node and ruff/mypy are found.
+PATH="/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
+home="${HOME:-}"
+for dir in /opt/homebrew/bin \
+    "$home/.local/bin" "$home/.volta/bin" "$home/.asdf/shims" \
+    "$home/.local/share/mise/shims" \
+    "$home"/.nvm/versions/node/*/bin "$home"/.local/share/fnm/*/bin "$home"/.fnm/*/bin; do
+    if [ -d "$dir" ]; then
+        PATH="$PATH:$dir"
+    fi
+done
+export PATH
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [ "${1:-}" = "--all" ]; then
+    run_playwright=true
+    run_python=true
+else
+    staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+    run_playwright=false
+    run_python=false
+
+    if printf '%s\n' "$staged_files" | grep -q '^playwright-test/'; then
+        run_playwright=true
+    fi
+    if printf '%s\n' "$staged_files" | grep -q '^python-tests/'; then
+        run_python=true
+    fi
+fi
+
+if [ "$run_playwright" = false ] && [ "$run_python" = false ]; then
+    echo "pre-commit: no playwright-test/ or python-tests/ changes staged; skipping."
+    exit 0
+fi
+
+echo "pre-commit: running lint and typecheck"
+
+if [ "$run_playwright" = true ]; then
+    echo "==> playwright-test: tsc + ESLint"
+    if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+        echo "pre-commit: npm/node not found in this environment; skipping Playwright checks." >&2
+        echo "pre-commit: run '.githooks/pre-commit --all' from a terminal to check manually." >&2
+    elif [ ! -d playwright-test/node_modules ]; then
+        echo "pre-commit: playwright-test/node_modules is missing; skipping Playwright checks." >&2
+        echo "pre-commit: run 'npm ci' in playwright-test/ and retry." >&2
+    else
+        (cd playwright-test && npm run typecheck && npm run lint)
+    fi
+fi
+
+if [ "$run_python" = true ]; then
+    echo "==> python-tests: ruff + mypy"
+    if [ -x python-tests/.venv/bin/ruff ] && [ -x python-tests/.venv/bin/mypy ]; then
+        ruff_cmd="$repo_root/python-tests/.venv/bin/ruff"
+        mypy_cmd="$repo_root/python-tests/.venv/bin/mypy"
+    elif command -v ruff >/dev/null 2>&1 && command -v mypy >/dev/null 2>&1; then
+        ruff_cmd="$(command -v ruff)"
+        mypy_cmd="$(command -v mypy)"
+    else
+        cat >&2 <<'EOF'
+pre-commit: ruff and mypy are not available; skipping Python checks.
+Create the local venv described in the README:
+  python3 -m venv python-tests/.venv
+  python-tests/.venv/bin/pip install -r python-tests/requirements-dev.txt
+or run '.githooks/pre-commit --all' from a terminal.
+EOF
+        ruff_cmd=""
+        mypy_cmd=""
+    fi
+    if [ -n "$ruff_cmd" ] && [ -n "$mypy_cmd" ]; then
+        (cd python-tests && "$ruff_cmd" check . && "$mypy_cmd")
+    fi
+fi
+
+echo "pre-commit: checks completed"

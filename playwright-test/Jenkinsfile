@@ -1,0 +1,146 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+        disableConcurrentBuilds()
+        ansiColor('xterm')
+    }
+
+    parameters {
+        choice(name: 'PW_PROJECT', choices: ['chromium', 'firefox', 'webkit', 'all'], description: 'Playwright project to run')
+        string(name: 'PW_GREP', defaultValue: '', description: 'Playwright --grep pattern (empty = all)')
+        string(name: 'BASE_URL', defaultValue: 'https://account.hanatrial.ondemand.com/', description: 'Base URL for the E2E tests')
+        booleanParam(name: 'PW_DEBUG', defaultValue: false, description: 'Enable Playwright debug logs')
+    }
+
+    environment {
+        // Credentials injected from the Jenkins Credentials Store.
+        FIORI_CREDENTIALS_ID   = 'fiori-credentials'
+        PW_IMAGE               = 'playwright-local:latest'
+        PW_NODE_MODULES_VOLUME = 'playwright_node_modules'
+        PW_OUTPUT_DIR          = 'playwright-test/playwright-report'
+        PW_RESULTS_DIR         = 'playwright-test/test-results'
+        CI                     = 'true'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'echo "Running commit: $(git rev-parse --short HEAD)"'
+            }
+        }
+
+        stage('Build Playwright Image') {
+            steps {
+                sh '''
+                    docker build \
+                        --build-arg PW_UID="$(id -u)" \
+                        --build-arg PW_GID="$(id -g)" \
+                        --tag "${PW_IMAGE}" \
+                        --file Dockerfile.playwright \
+                        .
+                '''
+            }
+        }
+
+        stage('Prepare node_modules Volume') {
+            steps {
+                sh '''
+                    # Recreate the named volume from the freshly built image so
+                    # the container always runs with the image's node_modules
+                    # (Docker populates an empty volume from the image path).
+                    # The remove is not forced: a leftover container holding
+                    # the volume fails the build instead of silently keeping
+                    # stale dependencies.
+                    if docker volume inspect "${PW_NODE_MODULES_VOLUME}" >/dev/null 2>&1; then
+                        docker volume rm "${PW_NODE_MODULES_VOLUME}"
+                    fi
+                    docker run --rm \
+                        --volume "${PW_NODE_MODULES_VOLUME}:/playwright-test/node_modules" \
+                        "${PW_IMAGE}" \
+                        true
+                '''
+            }
+        }
+
+        stage('Run Playwright Tests') {
+            steps {
+                lock('fiori-trial-account') {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.FIORI_CREDENTIALS_ID,
+                        usernameVariable: 'FIORI_USERNAME',
+                        passwordVariable: 'FIORI_PASSWORD'
+                    )]) {
+                        sh '''
+                            GREP_ARG=""
+                            if [ -n "${PW_GREP}" ]; then
+                                GREP_ARG="--grep ${PW_GREP}"
+                            fi
+
+                            if [ "${PW_PROJECT}" = "all" ]; then
+                                PROJECT_ARG=""
+                            else
+                                PROJECT_ARG="--project=${PW_PROJECT}"
+                            fi
+
+                            DEBUG_ARG=""
+                            if [ "${PW_DEBUG}" = "true" ]; then
+                                DEBUG_ARG="--env DEBUG=pw:api"
+                            fi
+
+                            mkdir -p "${PW_RESULTS_DIR}" "${PW_OUTPUT_DIR}"
+
+                            # Runs inside the playwright-local container, in the
+                            # checked-out workspace mounted from the Jenkins home.
+                            docker run --rm \
+                                --shm-size=2g \
+                                --volume "${WORKSPACE}/playwright-test:/playwright-test" \
+                                --volume "${PW_NODE_MODULES_VOLUME}:/playwright-test/node_modules" \
+                                --workdir /playwright-test \
+                                --env CI=true \
+                                --env BASE_URL="${BASE_URL}" \
+                                --env FIORI_USERNAME \
+                                --env FIORI_PASSWORD \
+                                ${DEBUG_ARG} \
+                                "${PW_IMAGE}" \
+                                npx playwright test \
+                                    ${PROJECT_ARG} \
+                                    ${GREP_ARG}
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : env.PW_OUTPUT_DIR,
+                reportFiles          : 'index.html',
+                reportName           : 'Playwright HTML Report'
+            ])
+
+            junit testResults: "${PW_RESULTS_DIR}/**/*.xml",
+                  allowEmptyResults: true
+
+            archiveArtifacts artifacts: "${PW_RESULTS_DIR}/**/*, ${PW_OUTPUT_DIR}/**/*",
+                             allowEmptyArchive: true
+
+            cleanWs()
+        }
+        success {
+            echo 'Playwright E2E tests passed successfully.'
+        }
+        failure {
+            echo 'Playwright E2E tests failed. Check the HTML report and trace files.'
+        }
+    }
+}

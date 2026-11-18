@@ -1,0 +1,35 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Jenkins runtime data
+jenkins_home/
+
+# Logs
+*.log
+logs/
+
+# Dependencies
+**/node_modules/
+playwright_node_modules/
+
+# Test artifacts
+playwright-test/playwright-report/
+playwright-test/test-results/
+robot-tests/results/
+python-tests/reports/
+python-tests/test-results/
+
+# Python caches
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+.claude/

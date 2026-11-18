@@ -1,0 +1,114 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+        disableConcurrentBuilds()
+        ansiColor('xterm')
+    }
+
+    parameters {
+        choice(name: 'BROWSER', choices: ['chromium', 'firefox', 'webkit'], description: 'Browser to run the tests with')
+        booleanParam(name: 'HEADLESS', defaultValue: true, description: 'Run browser in headless mode')
+        string(name: 'BASE_URL', defaultValue: 'https://account.hanatrial.ondemand.com/', description: 'Fiori trial URL')
+        string(name: 'PYTEST_MARKERS', defaultValue: 'fiori', description: 'pytest -m expression (e.g. fiori)')
+        string(name: 'PYTEST_K_EXPR', defaultValue: '', description: 'pytest -k expression (empty = all)')
+    }
+
+    environment {
+        FIORI_CREDENTIALS_ID = 'fiori-credentials'
+        PYTEST_IMAGE         = 'python-tests-local:latest'
+        PYTEST_REPORT_DIR    = 'python-tests/reports'
+        PYTEST_RESULTS_DIR   = 'python-tests/test-results'
+        PYTHONUNBUFFERED     = '1'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'echo "Running commit: $(git rev-parse --short HEAD)"'
+            }
+        }
+
+        stage('Build Python Test Image') {
+            steps {
+                sh '''
+                    docker build \
+                        --build-arg PYTEST_UID="$(id -u)" \
+                        --build-arg PYTEST_GID="$(id -g)" \
+                        --tag "${PYTEST_IMAGE}" \
+                        --file Dockerfile.python-tests \
+                        .
+                '''
+            }
+        }
+        stage('Run Python Tests') {
+            steps {
+                lock('fiori-trial-account') {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.FIORI_CREDENTIALS_ID,
+                        usernameVariable: 'FIORI_USERNAME',
+                        passwordVariable: 'FIORI_PASSWORD'
+                    )]) {
+                        sh '''
+                            K_ARG=""
+                            if [ -n "${PYTEST_K_EXPR}" ]; then
+                                K_ARG="-k ${PYTEST_K_EXPR}"
+                            fi
+
+                            mkdir -p "${PYTEST_REPORT_DIR}" "${PYTEST_RESULTS_DIR}"
+
+                            # Runs inside the python-tests-local container, in the
+                            # checked-out workspace mounted from the Jenkins home.
+                            docker run --rm \
+                                --shm-size=2g \
+                                --volume "${WORKSPACE}/python-tests:/tests" \
+                                --workdir /tests \
+                                --env BROWSER="${BROWSER}" \
+                                --env HEADLESS="${HEADLESS}" \
+                                --env BASE_URL="${BASE_URL}" \
+                                --env FIORI_USERNAME \
+                                --env FIORI_PASSWORD \
+                                "${PYTEST_IMAGE}" \
+                                pytest \
+                                    -m "${PYTEST_MARKERS}" \
+                                    ${K_ARG} \
+                                    --junitxml="test-results/junit.xml" \
+                                    tests/
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : env.PYTEST_REPORT_DIR,
+                reportFiles          : 'report.html',
+                reportName           : 'pytest HTML Report'
+            ])
+
+            junit testResults: "${PYTEST_RESULTS_DIR}/**/*.xml",
+                  allowEmptyResults: true
+
+            archiveArtifacts artifacts: "${PYTEST_REPORT_DIR}/**/*, ${PYTEST_RESULTS_DIR}/**/*",
+                             allowEmptyArchive: true
+
+            cleanWs()
+        }
+        success {
+            echo 'Python E2E tests passed successfully.'
+        }
+        failure {
+            echo 'Python E2E tests failed. Check the HTML report, screenshots and traces.'
+        }
+    }
+}

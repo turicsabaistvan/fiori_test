@@ -1,0 +1,39 @@
+# ---------- Single-stage build on top of the official Playwright Python image ----------
+FROM mcr.microsoft.com/playwright/python:v1.65.2-noble
+
+ARG PYTEST_UID=1000
+ARG PYTEST_GID=1000
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HEADLESS=true \
+    BROWSER=chromium
+
+# The official image already includes all browsers and OS dependencies.
+# Only install Python packages. The dev requirements (ruff, mypy) are
+# needed by the lint stage of the CI pipeline.
+
+COPY python-tests/requirements.txt python-tests/requirements-dev.txt /tmp/
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /tmp/requirements-dev.txt
+
+# The noble image ships with "pwuser" at UID/GID 1001, and also has an
+# "ubuntu" user at UID/GID 1000. Remap pwuser to the requested host UID/GID;
+# the -o flags allow the duplicate 1000 IDs when the host user is 1000.
+RUN if [ "$(id -u pwuser)" != "${PYTEST_UID}" ] || [ "$(id -g pwuser)" != "${PYTEST_GID}" ]; then \
+        groupmod -o -g "${PYTEST_GID}" pwuser \
+        && usermod -o -u "${PYTEST_UID}" -g "${PYTEST_GID}" pwuser \
+        && chown -R "${PYTEST_UID}:${PYTEST_GID}" /home/pwuser; \
+    fi
+
+# Working directory for tests
+RUN mkdir -p /tests/reports /tests/test-results \
+    && chown -R pwuser:pwuser /tests
+WORKDIR /tests
+
+# Drop privileges
+USER pwuser
+
+# Use tini as PID 1 (already present in the official image)
+CMD ["tail", "-f", "/dev/null"]
